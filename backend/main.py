@@ -1,6 +1,7 @@
 """FastAPI application for the Facto web compiler."""
 
 import json
+import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, Response
@@ -18,6 +19,7 @@ from compiler_service import (
 from stats import get_stats
 
 settings = get_settings()
+logger = logging.getLogger("facto_backend")
 
 
 # ==================== Security Middleware ====================
@@ -125,6 +127,11 @@ async def compile_code(request: Request, body: CompileRequest):
 
     Returns a Server-Sent Events stream with compilation progress and results.
     """
+    client_ip = request.client.host if request.client else "unknown"
+    logger.info(
+        f"Compilation request from {client_ip}, source length: {len(body.source)}"
+    )
+
     options = CompilerOptions(
         power_poles=body.power_poles,
         name=body.blueprint_name,
@@ -135,13 +142,18 @@ async def compile_code(request: Request, body: CompileRequest):
 
     async def event_generator():
         """Generate SSE events from compiler output."""
-        async for output_type, content in compile_facto(body.source, options):
-            # Format as SSE
-            event_data = json.dumps({"type": output_type.value, "content": content})
-            yield f"data: {event_data}\n\n"
+        try:
+            async for output_type, content in compile_facto(body.source, options):
+                # Format as SSE
+                event_data = json.dumps({"type": output_type.value, "content": content})
+                yield f"data: {event_data}\n\n"
 
-        # Send end event
-        yield f"data: {json.dumps({'type': 'end', 'content': ''})}\n\n"
+            # Send end event
+            yield f"data: {json.dumps({'type': 'end', 'content': ''})}\n\n"
+        except Exception as e:
+            logger.error(f"Error during compilation streaming: {e}", exc_info=True)
+            error_data = json.dumps({"type": "error", "content": str(e)})
+            yield f"data: {error_data}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -162,6 +174,9 @@ async def compile_code_sync(request: Request, body: CompileRequest):
 
     Alternative to streaming for clients that don't support SSE.
     """
+    client_ip = request.client.host if request.client else "unknown"
+    logger.info(f"Sync compilation request from {client_ip}")
+
     options = CompilerOptions(
         power_poles=body.power_poles,
         name=body.blueprint_name,
@@ -175,15 +190,19 @@ async def compile_code_sync(request: Request, body: CompileRequest):
     errors = []
     status = None
 
-    async for output_type, content in compile_facto(body.source, options):
-        if output_type == OutputType.LOG:
-            logs.append(content)
-        elif output_type == OutputType.BLUEPRINT:
-            blueprint = content
-        elif output_type == OutputType.ERROR:
-            errors.append(content)
-        elif output_type == OutputType.STATUS:
-            status = content
+    try:
+        async for output_type, content in compile_facto(body.source, options):
+            if output_type == OutputType.LOG:
+                logs.append(content)
+            elif output_type == OutputType.BLUEPRINT:
+                blueprint = content
+            elif output_type == OutputType.ERROR:
+                errors.append(content)
+            elif output_type == OutputType.STATUS:
+                status = content
+    except Exception as e:
+        logger.error(f"Error during sync compilation: {e}", exc_info=True)
+        errors.append(str(e))
 
     return {
         "success": blueprint is not None,

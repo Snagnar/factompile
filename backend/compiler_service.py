@@ -1,8 +1,7 @@
-"""Facto compiler service with streaming output."""
+"""Facto compiler service with streaming output and direct compilation."""
 
 import asyncio
-import tempfile
-import os
+import logging
 import re
 import time
 import uuid
@@ -10,11 +9,41 @@ from pathlib import Path
 from typing import AsyncGenerator, Callable
 from dataclasses import dataclass
 from enum import Enum
+from logging.handlers import TimedRotatingFileHandler
+
+from dsl_compiler.cli import compile_dsl_source
 
 from config import get_settings
 from stats import get_stats
 
 settings = get_settings()
+
+# Setup logging with hourly rotation
+logger = logging.getLogger("facto_compiler")
+logger.setLevel(logging.INFO if not settings.debug_mode else logging.DEBUG)
+
+# Create logs directory if it doesn't exist
+log_dir = Path("logs")
+log_dir.mkdir(exist_ok=True)
+
+# Hourly rotating file handler
+file_handler = TimedRotatingFileHandler(
+    log_dir / "facto_backend.log",
+    when="H",  # Rotate hourly
+    interval=1,
+    backupCount=24 * 7,  # Keep 7 days of logs
+    encoding="utf-8",
+)
+file_handler.setFormatter(
+    logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+)
+logger.addHandler(file_handler)
+
+# Console handler for debug mode
+if settings.debug_mode:
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    logger.addHandler(console_handler)
 
 
 class OutputType(str, Enum):
@@ -186,6 +215,8 @@ def sanitize_source(source: str) -> str:
     """
     Sanitize source code to prevent injection attacks.
     Returns cleaned source or raises ValueError.
+
+    Only validates basic security without rejecting legitimate Facto code.
     """
     if not source or not source.strip():
         raise ValueError("Source code cannot be empty")
@@ -195,55 +226,142 @@ def sanitize_source(source: str) -> str:
             f"Source code exceeds maximum length of {settings.max_source_length} characters"
         )
 
-    # Remove null bytes and control characters (except newline, carriage return, tab)
-    source = "".join(
-        char
-        for char in source
-        if char in "\n\r\t" or (ord(char) >= 32 and ord(char) != 127)
-    )
+    # Remove null bytes only (they're never valid in text)
+    if "\x00" in source:
+        raise ValueError("Source code contains null bytes")
 
-    # Check for suspicious patterns (shell injection attempts)
-    # These patterns could be dangerous if the source somehow gets shell-evaluated
-    suspicious_patterns = [
-        (r"`[^`]*`", "backtick command substitution"),
-        (r"\$\([^)]*\)", "$() command substitution"),
-        (r"\$\{[^}]*\}", "${} variable expansion"),
-        (r";\s*(rm|cat|wget|curl|nc|bash|sh|python|perl|ruby|php)\s", "shell command"),
-        (r"\|\s*(sh|bash|zsh|python|perl|ruby)\b", "pipe to shell"),
-        (r">\s*/", "redirect to absolute path"),
-        (r"\.\./", "path traversal"),
-        (r"[&|;]\s*[&|]", "command chaining"),
+    # Simple check for obvious shell injection (bash-style)
+    # These would never appear in Facto code which is Python-compiled
+    dangerous_patterns = [
+        r";\s*(rm|wget|curl)\s+-",  # Direct dangerous commands
+        r"\$\(.*\bsh\b",  # $(sh ...) style
+        r"`.*\bsh\b",  # `sh ...` style
     ]
 
-    for pattern, description in suspicious_patterns:
-        if re.search(pattern, source, re.IGNORECASE):
-            raise ValueError(f"Source contains potentially malicious content")
+    for pattern in dangerous_patterns:
+        if re.search(pattern, source):
+            raise ValueError("Source contains potentially dangerous patterns")
 
+    logger.debug(f"Source validation passed ({len(source)} chars)")
     return source
 
 
-def build_compiler_command(
-    source_path: str, output_path: str, options: CompilerOptions
-) -> list[str]:
-    """Build the compiler command with options."""
-    cmd = [settings.facto_compiler_path, source_path, "-o", output_path]
+async def compile_facto_direct(
+    source: str, options: CompilerOptions
+) -> AsyncGenerator[tuple[OutputType, str], None]:
+    """
+    Compile Facto source code directly using the in-process compiler.
+    Yields tuples of (output_type, content) for streaming to frontend.
 
-    if options.power_poles:
-        cmd.extend(["--power-poles", options.power_poles])
+    Captures logging output in real-time and streams it to the client.
+    """
+    import io
+    import logging as py_logging
+    from logging import StreamHandler
 
-    if options.name:
-        cmd.extend(["--name", options.name])
+    try:
+        logger.info(
+            f"Starting compilation with options: optimize={not options.no_optimize}, power_poles={options.power_poles}"
+        )
 
-    if options.no_optimize:
-        cmd.append("--no-optimize")
+        # Sanitize input first
+        try:
+            source = sanitize_source(source)
+        except ValueError as e:
+            logger.warning(f"Source validation failed: {e}")
+            yield (OutputType.ERROR, str(e))
+            return
 
-    if options.json_output:
-        cmd.append("--json")
+        yield (OutputType.STATUS, "Compiling...")
 
-    if options.log_level:
-        cmd.extend(["--log-level", options.log_level])
+        # Create a string buffer to capture log output
+        log_stream = io.StringIO()
+        log_handler = StreamHandler(log_stream)
+        log_handler.setLevel(getattr(py_logging, options.log_level.upper()))
+        log_handler.setFormatter(py_logging.Formatter("%(levelname)s: %(message)s"))
 
-    return cmd
+        # Get the dsl_compiler logger and add our handler
+        dsl_logger = py_logging.getLogger("dsl_compiler")
+        root_logger = py_logging.getLogger()
+
+        # Store original level and add handler
+        original_dsl_level = dsl_logger.level
+        original_root_level = root_logger.level
+
+        dsl_logger.addHandler(log_handler)
+        root_logger.addHandler(log_handler)
+        dsl_logger.setLevel(getattr(py_logging, options.log_level.upper()))
+        root_logger.setLevel(getattr(py_logging, options.log_level.upper()))
+
+        # Run compilation in executor to not block event loop
+        # and allow us to capture logs progressively
+        loop = asyncio.get_event_loop()
+
+        def run_compile():
+            return compile_dsl_source(
+                source_code=source,
+                source_name="<web>",
+                program_name=options.name,
+                optimize=not options.no_optimize,
+                log_level=options.log_level,
+                power_pole_type=options.power_poles,
+                use_json=options.json_output,
+            )
+
+        # Run compilation in thread pool
+        compile_task = loop.run_in_executor(None, run_compile)
+
+        # Poll for log output while compilation runs
+        last_pos = 0
+        while not compile_task.done():
+            await asyncio.sleep(0.1)  # Check every 100ms
+
+            # Get new log content
+            current_content = log_stream.getvalue()
+            if len(current_content) > last_pos:
+                new_logs = current_content[last_pos:]
+                for line in new_logs.splitlines():
+                    if line.strip():
+                        yield (OutputType.LOG, line)
+                last_pos = len(current_content)
+
+        # Get final result
+        success, result, diagnostics = await compile_task
+
+        # Flush any remaining logs
+        current_content = log_stream.getvalue()
+        if len(current_content) > last_pos:
+            new_logs = current_content[last_pos:]
+            for line in new_logs.splitlines():
+                if line.strip():
+                    yield (OutputType.LOG, line)
+
+        # Clean up logging handler
+        dsl_logger.removeHandler(log_handler)
+        root_logger.removeHandler(log_handler)
+        dsl_logger.setLevel(original_dsl_level)
+        root_logger.setLevel(original_root_level)
+        log_handler.close()
+
+        # Stream diagnostic messages as logs
+        if diagnostics:
+            for msg in diagnostics:
+                if msg.strip():
+                    yield (OutputType.LOG, msg)
+
+        if success:
+            logger.info("Compilation successful")
+            yield (OutputType.STATUS, "Compilation successful!")
+            yield (OutputType.BLUEPRINT, result)
+        else:
+            logger.warning(f"Compilation failed: {result}")
+            yield (OutputType.STATUS, f"Compilation failed: {result}")
+            yield (OutputType.ERROR, result)
+
+    except Exception as e:
+        logger.error(f"Compilation error: {e}", exc_info=True)
+        yield (OutputType.ERROR, f"Internal compiler error: {str(e)}")
+        yield (OutputType.STATUS, "Compilation failed")
 
 
 async def compile_facto(
@@ -253,9 +371,12 @@ async def compile_facto(
     Compile Facto source code and yield output as it becomes available.
 
     Yields tuples of (output_type, content) for streaming to frontend.
+    Handles queuing and resource management.
     """
     queue = get_compilation_queue()
     request_id = str(uuid.uuid4())
+
+    logger.info(f"New compilation request {request_id}")
 
     # Track queue position updates to yield
     position_updates: list[int] = []
@@ -266,6 +387,9 @@ async def compile_facto(
     # Check initial queue length
     initial_queue_length = queue.queue_length
     if initial_queue_length > 0 or queue._current is not None:
+        logger.info(
+            f"Request {request_id} queued at position {initial_queue_length + 1}"
+        )
         yield (OutputType.QUEUE, str(initial_queue_length + 1))
         yield (
             OutputType.STATUS,
@@ -286,6 +410,7 @@ async def compile_facto(
             except asyncio.TimeoutError:
                 # Check overall queue timeout
                 if time.perf_counter() - start_wait > settings.queue_timeout:
+                    logger.warning(f"Request {request_id} timed out in queue")
                     await queue.release(request_id)
                     yield (
                         OutputType.ERROR,
@@ -300,10 +425,12 @@ async def compile_facto(
 
         success, error_msg = acquire_task.result()
         if not success:
+            logger.warning(f"Request {request_id} failed to acquire slot: {error_msg}")
             yield (OutputType.ERROR, error_msg or "Failed to acquire compilation slot")
             return
 
     except asyncio.TimeoutError:
+        logger.warning(f"Request {request_id} timed out acquiring slot")
         yield (
             OutputType.ERROR,
             "Queue timeout. Server is very busy. Please try again later.",
@@ -312,6 +439,7 @@ async def compile_facto(
         return
 
     # Now we have the slot, yield position 0
+    logger.info(f"Request {request_id} acquired compilation slot")
     yield (OutputType.QUEUE, "0")
 
     # Record compilation start
@@ -321,119 +449,23 @@ async def compile_facto(
     start_time = time.perf_counter()
 
     try:
-        # Sanitize input
-        try:
-            source = sanitize_source(source)
-        except ValueError as e:
-            yield (OutputType.ERROR, str(e))
-            return
+        # Compile directly in-process
+        async for output_type, content in compile_facto_direct(source, options):
+            yield (output_type, content)
+            if output_type == OutputType.BLUEPRINT:
+                compilation_success = True
 
-        yield (OutputType.STATUS, "Starting compilation...")
-
-        # Create temporary file for source
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".facto", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(source)
-            source_path = f.name
-
-        # Create temporary file for output blueprint
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", delete=False, encoding="utf-8"
-        ) as f:
-            output_path = f.name
-
-        try:
-            # Build command
-            cmd = build_compiler_command(source_path, output_path, options)
-
-            # In debug mode, show full command; in production, hide internal paths
-            if settings.debug_mode:
-                yield (OutputType.LOG, f"Running: {' '.join(cmd)}")
-            else:
-                yield (OutputType.LOG, "Starting compilation...")
-
-            # Run compiler with timeout
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=os.path.dirname(source_path),
-                )
-            except FileNotFoundError:
-                # Don't expose internal paths in production
-                yield (
-                    OutputType.ERROR,
-                    "Compiler not found. Please contact the administrator.",
-                )
-                return
-
-            # Collect output with timeout
-            try:
-                async with asyncio.timeout(settings.compilation_timeout):
-                    stderr_data = []
-
-                    # Read stderr (log output) line by line
-                    if process.stderr:
-                        while True:
-                            line = await process.stderr.readline()
-                            if not line:
-                                break
-                            decoded = line.decode("utf-8", errors="replace").rstrip()
-                            # Sanitize output to hide internal paths
-                            decoded = decoded.replace(source_path, "[source]")
-                            decoded = decoded.replace(output_path, "[output]")
-                            stderr_data.append(decoded)
-                            yield (OutputType.LOG, decoded)
-
-                    # Wait for process to complete
-                    await process.wait()
-
-                    if process.returncode == 0:
-                        yield (OutputType.STATUS, "Compilation successful!")
-                        compilation_success = True
-                        # Read blueprint from output file (clean output)
-                        try:
-                            with open(output_path, "r", encoding="utf-8") as bp_file:
-                                blueprint = bp_file.read().strip()
-                                if blueprint:
-                                    yield (OutputType.BLUEPRINT, blueprint)
-                        except FileNotFoundError:
-                            yield (
-                                OutputType.ERROR,
-                                "Compilation failed: no output generated",
-                            )
-                            compilation_success = False
-                    else:
-                        yield (
-                            OutputType.STATUS,
-                            f"Compilation failed (exit code {process.returncode})",
-                        )
-                        yield (OutputType.ERROR, "See log output for details")
-
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-                yield (
-                    OutputType.ERROR,
-                    f"Compilation timed out after {settings.compilation_timeout} seconds",
-                )
-
-        finally:
-            # Clean up temporary files
-            try:
-                os.unlink(source_path)
-            except OSError:
-                pass
-            try:
-                os.unlink(output_path)
-            except OSError:
-                pass
+    except Exception as e:
+        logger.error(f"Compilation failed for request {request_id}: {e}", exc_info=True)
+        yield (OutputType.ERROR, f"Compilation error: {str(e)}")
 
     finally:
         # Record compilation result with timing
         duration = time.perf_counter() - start_time
+        logger.info(
+            f"Request {request_id} completed in {duration:.2f}s, success={compilation_success}"
+        )
+
         if compilation_success:
             await stats.record_compilation_success(duration)
         else:
