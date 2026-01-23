@@ -371,12 +371,21 @@ async def compile_facto_direct(
             logger.info("Compilation successful")
             yield (OutputType.STATUS, "Compilation successful!")
             
-            # result is now JSON string - yield it
-            yield (OutputType.JSON, result)
+            # result is now JSON - ensure it's a string for SSE transmission
+            if isinstance(result, dict):
+                json_str = json.dumps(result)
+            else:
+                json_str = result
+            
+            # Yield JSON output
+            yield (OutputType.JSON, json_str)
             
             # Convert to blueprint and yield
             try:
-                json_data = json.loads(result)
+                if isinstance(result, dict):
+                    json_data = result
+                else:
+                    json_data = json.loads(result)
                 blueprint = json_to_blueprint(json_data)
                 yield (OutputType.BLUEPRINT, blueprint)
             except Exception as e:

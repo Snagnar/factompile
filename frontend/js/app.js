@@ -102,12 +102,26 @@
     // Initialize CodeMirror editor
     editor = window.FactoEditor.init('code-editor');
     
+    // Get the first example key as default
+    const exampleKeys = Object.keys(window.FactoEditor.examples);
+    const defaultExampleKey = exampleKeys[0] || 'blinker';
+    
     // Load saved content or default example
     const savedContent = loadEditorContent();
+    let loadedExampleKey = null;
+    
     if (savedContent) {
       editor.setValue(savedContent);
+      // Try to match saved content to an example
+      for (const key of exampleKeys) {
+        if (window.FactoEditor.examples[key] === savedContent) {
+          loadedExampleKey = key;
+          break;
+        }
+      }
     } else {
-      editor.setValue(window.FactoEditor.examples.blinker);
+      editor.setValue(window.FactoEditor.examples[defaultExampleKey]);
+      loadedExampleKey = defaultExampleKey;
     }
     
     // Listen for changes and save (also reset lastCompiledSource)
@@ -125,7 +139,7 @@
     bindEvents();
     
     // Populate example dropdown with built-in examples
-    populateExampleDropdown();
+    populateExampleDropdown(loadedExampleKey);
     
     // Start health checks
     startHealthChecks();
@@ -630,9 +644,10 @@
   
   /**
    * Populate example dropdown with built-in examples
+   * @param {string|null} selectedKey - The key of the example to pre-select
    */
-  function populateExampleDropdown() {
-    // Clear existing options except first
+  function populateExampleDropdown(selectedKey = null) {
+    // Clear existing options except first placeholder
     while (elements.exampleSelect.options.length > 1) {
       elements.exampleSelect.remove(1);
     }
@@ -646,6 +661,11 @@
       option.textContent = option.textContent.charAt(0).toUpperCase() + option.textContent.slice(1);
       elements.exampleSelect.appendChild(option);
     });
+    
+    // Select the loaded example if provided
+    if (selectedKey) {
+      elements.exampleSelect.value = selectedKey;
+    }
   }
   
   /**

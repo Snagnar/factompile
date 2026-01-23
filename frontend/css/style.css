@@ -1281,6 +1281,13 @@ kbd {
   
   .accordion-toggle {
     display: flex;
+    border-radius: var(--radius-lg);
+  }
+  
+  .accordion-toggle.expanded {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    border-bottom: none;
   }
   
   .accordion-content {
@@ -1290,6 +1297,7 @@ kbd {
     padding: 0;
     margin: 0;
     border: none;
+    background: var(--bg-dark);
   }
   
   .accordion-content.expanded {
@@ -1297,9 +1305,10 @@ kbd {
     overflow: visible;
     opacity: 1;
     padding: 14px;
-    margin-top: 8px;
+    margin-top: 0;
     border: 1px solid var(--border-color);
-    border-radius: var(--radius-lg);
+    border-top: none;
+    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
   }
   
   /* Options in two columns */
