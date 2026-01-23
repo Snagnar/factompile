@@ -187,6 +187,7 @@ async def compile_code_sync(request: Request, body: CompileRequest):
 
     logs = []
     blueprint = None
+    json_output = None
     errors = []
     status = None
 
@@ -196,6 +197,8 @@ async def compile_code_sync(request: Request, body: CompileRequest):
                 logs.append(content)
             elif output_type == OutputType.BLUEPRINT:
                 blueprint = content
+            elif output_type == OutputType.JSON:
+                json_output = content
             elif output_type == OutputType.ERROR:
                 errors.append(content)
             elif output_type == OutputType.STATUS:
@@ -209,6 +212,7 @@ async def compile_code_sync(request: Request, body: CompileRequest):
         "status": status,
         "logs": logs,
         "blueprint": blueprint,
+        "json": json_output,
         "errors": errors,
     }
 

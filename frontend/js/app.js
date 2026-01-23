@@ -5,6 +5,11 @@
 (function() {
   'use strict';
   
+  // Storage keys for localStorage
+  const STORAGE_KEYS = {
+    editorContent: 'facto-editor-content'
+  };
+  
   // DOM Elements
   let editor;
   const elements = {
@@ -18,13 +23,28 @@
     powerPoles: document.getElementById('power-poles'),
     logLevel: document.getElementById('log-level'),
     noOptimize: document.getElementById('no-optimize'),
-    jsonOutput: document.getElementById('json-output'),
     logOutput: document.getElementById('log-output'),
     blueprintStatus: document.getElementById('blueprint-status'),
     blueprintOutput: document.getElementById('blueprint-output'),
     blueprintText: document.getElementById('blueprint-text'),
     copyBlueprint: document.getElementById('copy-blueprint'),
     downloadBlueprint: document.getElementById('download-blueprint'),
+    // JSON tab elements
+    jsonStatus: document.getElementById('json-status'),
+    jsonOutputContainer: document.getElementById('json-output-container'),
+    jsonText: document.getElementById('json-text'),
+    copyJson: document.getElementById('copy-json'),
+    downloadJson: document.getElementById('download-json'),
+    // Modal elements
+    confirmModal: document.getElementById('confirm-modal'),
+    modalCancel: document.getElementById('modal-cancel'),
+    modalConfirm: document.getElementById('modal-confirm'),
+    // Accordion elements
+    accordionToggle: document.getElementById('accordion-toggle'),
+    accordionContent: document.getElementById('accordion-content'),
+    // Theme toggle
+    themeToggle: document.getElementById('theme-toggle'),
+    // Other
     tabBtns: document.querySelectorAll('.tab-btn'),
     toastContainer: document.getElementById('toast-container'),
     statusIndicator: document.getElementById('status-indicator'),
@@ -35,16 +55,71 @@
   let isCompiling = false;
   let serverConnected = false;
   let healthCheckInterval = null;
+  let lastCompiledSource = null;
+  
+  /**
+   * Debounce utility function
+   */
+  function debounce(fn, delay) {
+    let timeoutId;
+    return (...args) => {
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => fn(...args), delay);
+    };
+  }
+  
+  /**
+   * Save editor content to localStorage
+   */
+  function saveEditorContent() {
+    const content = editor.getValue();
+    if (content.trim()) {
+      localStorage.setItem(STORAGE_KEYS.editorContent, content);
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.editorContent);
+    }
+  }
+  
+  /**
+   * Load editor content from localStorage
+   */
+  function loadEditorContent() {
+    return localStorage.getItem(STORAGE_KEYS.editorContent);
+  }
+  
+  // Debounced save function
+  const debouncedSave = debounce(saveEditorContent, 1000);
   
   /**
    * Initialize the application
    */
   async function init() {
+    // Initialize theme manager first
+    if (window.ThemeManager) {
+      window.ThemeManager.init();
+    }
+    
     // Initialize CodeMirror editor
     editor = window.FactoEditor.init('code-editor');
     
-    // Load default example
-    editor.setValue(window.FactoEditor.examples.blinker);
+    // Load saved content or default example
+    const savedContent = loadEditorContent();
+    if (savedContent) {
+      editor.setValue(savedContent);
+    } else {
+      editor.setValue(window.FactoEditor.examples.blinker);
+    }
+    
+    // Listen for changes and save (also reset lastCompiledSource)
+    editor.on('change', () => {
+      debouncedSave();
+      lastCompiledSource = null;
+    });
+    
+    // Update CodeMirror theme based on current theme
+    if (window.ThemeManager) {
+      window.ThemeManager.updateCodeMirrorTheme(window.ThemeManager.getTheme());
+    }
     
     // Bind event listeners
     bindEvents();
@@ -69,16 +144,45 @@
         e.preventDefault();
         handleCompile();
       }
+      // Close modal on Escape
+      if (e.key === 'Escape' && !elements.confirmModal.classList.contains('hidden')) {
+        hideConfirmModal();
+      }
     });
     
     // Example select dropdown
     elements.exampleSelect.addEventListener('change', handleExampleSelect);
     
-    // Clear editor button
+    // Clear editor button - show confirmation modal
     elements.clearEditorBtn.addEventListener('click', () => {
+      if (editor.getValue().trim()) {
+        showConfirmModal();
+      }
+    });
+    
+    // Modal event handlers
+    elements.modalCancel.addEventListener('click', hideConfirmModal);
+    elements.modalConfirm.addEventListener('click', () => {
       editor.setValue('');
       editor.focus();
+      saveEditorContent();
+      hideConfirmModal();
     });
+    elements.confirmModal.querySelector('.modal-backdrop').addEventListener('click', hideConfirmModal);
+    
+    // Accordion toggle for mobile
+    if (elements.accordionToggle) {
+      elements.accordionToggle.addEventListener('click', toggleAccordion);
+    }
+    
+    // Theme toggle
+    if (elements.themeToggle) {
+      elements.themeToggle.addEventListener('click', () => {
+        if (window.ThemeManager) {
+          window.ThemeManager.toggle();
+        }
+      });
+    }
     
     // Tab switching
     elements.tabBtns.forEach(btn => {
@@ -90,6 +194,38 @@
     
     // Download blueprint
     elements.downloadBlueprint.addEventListener('click', downloadBlueprint);
+    
+    // Copy JSON
+    if (elements.copyJson) {
+      elements.copyJson.addEventListener('click', copyJsonToClipboard);
+    }
+    
+    // Download JSON
+    if (elements.downloadJson) {
+      elements.downloadJson.addEventListener('click', downloadJson);
+    }
+  }
+  
+  /**
+   * Show confirmation modal
+   */
+  function showConfirmModal() {
+    elements.confirmModal.classList.remove('hidden');
+  }
+  
+  /**
+   * Hide confirmation modal
+   */
+  function hideConfirmModal() {
+    elements.confirmModal.classList.add('hidden');
+  }
+  
+  /**
+   * Toggle accordion for mobile
+   */
+  function toggleAccordion() {
+    elements.accordionToggle.classList.toggle('expanded');
+    elements.accordionContent.classList.toggle('expanded');
   }
   
   /**
@@ -169,6 +305,19 @@
   }
   
   /**
+   * Get compilation key for caching
+   */
+  function getCompilationKey(source, options) {
+    return JSON.stringify({
+      source: source,
+      powerPoles: options.powerPoles,
+      blueprintName: options.blueprintName,
+      noOptimize: options.noOptimize,
+      logLevel: options.logLevel
+    });
+  }
+  
+  /**
    * Handle compile button click
    */
   async function handleCompile() {
@@ -190,18 +339,26 @@
       return;
     }
     
-    // Get options
+    // Get options (no more jsonOutput)
     const options = {
       blueprintName: elements.blueprintName.value.trim() || null,
       powerPoles: elements.powerPoles.value || null,
       logLevel: elements.logLevel.value,
-      noOptimize: elements.noOptimize.checked,
-      jsonOutput: elements.jsonOutput.checked
+      noOptimize: elements.noOptimize.checked
     };
+    
+    // Check if code is unchanged from last successful compilation
+    const currentKey = getCompilationKey(source, options);
+    if (lastCompiledSource === currentKey && elements.blueprintText.value) {
+      showToast('Code unchanged - showing previous result', 'warning');
+      switchTab('blueprint');
+      return;
+    }
     
     // Update UI
     setCompiling(true);
     clearLog();
+    clearJson();
     clearBlueprint();
     switchTab('log');
     
@@ -211,6 +368,7 @@
       await window.FactoCompiler.compileWithStreaming(source, options, {
         onLog: (message) => appendLog(message, 'info'),
         onBlueprint: (blueprint) => setBlueprint(blueprint),
+        onJson: (json) => setJson(json),
         onError: (error) => {
           hasError = true;
           appendLog(error, 'error');
@@ -230,6 +388,7 @@
           
           // Auto-switch to blueprint tab if successful
           if (elements.blueprintText.value) {
+            lastCompiledSource = currentKey;
             switchTab('blueprint');
             showToast('Compilation successful! Blueprint ready to copy.', 'success');
           } else if (hasError) {
@@ -316,6 +475,92 @@
     elements.blueprintText.value = blueprint;
     elements.blueprintStatus.classList.add('hidden');
     elements.blueprintOutput.classList.add('visible');
+  }
+  
+  /**
+   * Clear JSON output
+   */
+  function clearJson() {
+    if (elements.jsonText) {
+      elements.jsonText.value = '';
+    }
+    if (elements.jsonStatus) {
+      elements.jsonStatus.classList.remove('hidden');
+    }
+    if (elements.jsonOutputContainer) {
+      elements.jsonOutputContainer.classList.remove('visible');
+    }
+  }
+  
+  /**
+   * Set JSON output
+   */
+  function setJson(jsonStr) {
+    if (!elements.jsonText) return;
+    
+    // Pretty print the JSON
+    try {
+      const parsed = JSON.parse(jsonStr);
+      elements.jsonText.value = JSON.stringify(parsed, null, 2);
+    } catch {
+      elements.jsonText.value = jsonStr;
+    }
+    
+    if (elements.jsonStatus) {
+      elements.jsonStatus.classList.add('hidden');
+    }
+    if (elements.jsonOutputContainer) {
+      elements.jsonOutputContainer.classList.add('visible');
+    }
+  }
+  
+  /**
+   * Copy JSON to clipboard
+   */
+  async function copyJsonToClipboard() {
+    const json = elements.jsonText?.value;
+    
+    if (!json) {
+      showToast('No JSON to copy', 'error');
+      return;
+    }
+    
+    try {
+      await navigator.clipboard.writeText(json);
+      showToast('JSON copied to clipboard!', 'success');
+    } catch {
+      elements.jsonText.select();
+      document.execCommand('copy');
+      showToast('JSON copied to clipboard!', 'success');
+    }
+  }
+  
+  /**
+   * Download JSON as file
+   */
+  function downloadJson() {
+    const json = elements.jsonText?.value;
+    
+    if (!json) {
+      showToast('No JSON to download', 'error');
+      return;
+    }
+    
+    const filename = (elements.blueprintName.value.trim() || 'facto-output')
+      .replace(/[^a-z0-9]/gi, '_') + '.json';
+    
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    
+    showToast(`JSON saved as ${filename}`, 'success');
   }
   
   /**
@@ -413,8 +658,7 @@
     const code = window.FactoEditor.examples[value];
     if (code) {
       editor.setValue(code);
-      const displayName = value.replace(/([A-Z])/g, ' $1').trim();
-      showToast(`Loaded: ${displayName}`, 'success');
+      saveEditorContent();
     }
     // Keep the selected value to show which example is loaded
   }
@@ -429,9 +673,16 @@
     // Create icon span with safe innerHTML (hardcoded SVGs)
     const iconSpan = document.createElement('span');
     iconSpan.className = 'toast-icon';
-    iconSpan.innerHTML = type === 'success' 
-      ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><polyline points="20 6 9 17 4 12"></polyline></svg>'
-      : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>';
+    
+    let iconSvg;
+    if (type === 'success') {
+      iconSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+    } else if (type === 'warning') {
+      iconSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>';
+    } else {
+      iconSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>';
+    }
+    iconSpan.innerHTML = iconSvg;
     
     // Create message span with textContent (safe - escapes HTML)
     const messageSpan = document.createElement('span');

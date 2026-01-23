@@ -27,14 +27,14 @@ const CONFIG = {
  * Compile Facto code using Server-Sent Events (streaming)
  */
 async function compileWithStreaming(source, options, callbacks) {
-  const { onLog, onBlueprint, onError, onStatus, onQueue, onComplete } = callbacks;
+  const { onLog, onBlueprint, onJson, onError, onStatus, onQueue, onComplete } = callbacks;
   
   const requestBody = {
     source: source,
     power_poles: options.powerPoles || null,
     blueprint_name: options.blueprintName || null,
     no_optimize: options.noOptimize || false,
-    json_output: options.jsonOutput || false,
+    json_output: false, // Always false - backend always produces both now
     log_level: options.logLevel || 'info'
   };
   
@@ -91,6 +91,9 @@ async function compileWithStreaming(source, options, callbacks) {
                 break;
               case 'blueprint':
                 onBlueprint?.(event.content);
+                break;
+              case 'json':
+                onJson?.(event.content);
                 break;
               case 'error':
                 onError?.(event.content);

@@ -1,10 +1,13 @@
 """Facto compiler service with streaming output and direct compilation."""
 
 import asyncio
+import base64
+import json
 import logging
 import re
 import time
 import uuid
+import zlib
 from pathlib import Path
 from typing import AsyncGenerator, Callable
 from dataclasses import dataclass
@@ -49,9 +52,23 @@ if settings.debug_mode:
 class OutputType(str, Enum):
     LOG = "log"
     BLUEPRINT = "blueprint"
+    JSON = "json"
     ERROR = "error"
     STATUS = "status"
     QUEUE = "queue"  # For queue position updates
+
+
+def json_to_blueprint(json_data: dict | str) -> str:
+    """Convert JSON data to Factorio blueprint string."""
+    if isinstance(json_data, dict):
+        json_str = json.dumps(json_data, separators=(',', ':'))
+    else:
+        json_str = json_data
+    
+    json_bytes = json_str.encode('utf-8')
+    compressed = zlib.compress(json_bytes, level=9)
+    encoded = base64.b64encode(compressed).decode('ascii')
+    return '0' + encoded
 
 
 @dataclass
@@ -298,6 +315,7 @@ async def compile_facto_direct(
         loop = asyncio.get_event_loop()
 
         def run_compile():
+            # Always compile with JSON output to get the data structure
             return compile_dsl_source(
                 source_code=source,
                 source_name="<web>",
@@ -305,7 +323,7 @@ async def compile_facto_direct(
                 optimize=not options.no_optimize,
                 log_level=options.log_level,
                 power_pole_type=options.power_poles,
-                use_json=options.json_output,
+                use_json=True,  # Always get JSON
             )
 
         # Run compilation in thread pool
@@ -352,7 +370,18 @@ async def compile_facto_direct(
         if success:
             logger.info("Compilation successful")
             yield (OutputType.STATUS, "Compilation successful!")
-            yield (OutputType.BLUEPRINT, result)
+            
+            # result is now JSON string - yield it
+            yield (OutputType.JSON, result)
+            
+            # Convert to blueprint and yield
+            try:
+                json_data = json.loads(result)
+                blueprint = json_to_blueprint(json_data)
+                yield (OutputType.BLUEPRINT, blueprint)
+            except Exception as e:
+                logger.error(f"Failed to convert JSON to blueprint: {e}")
+                yield (OutputType.ERROR, f"Blueprint conversion failed: {str(e)}")
         else:
             logger.warning(f"Compilation failed: {result}")
             yield (OutputType.STATUS, f"Compilation failed: {result}")
