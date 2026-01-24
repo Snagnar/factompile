@@ -36,16 +36,8 @@ from dotenv import load_dotenv
 import yaml
 
 
-try:
-    from telegram import Update
-    from telegram.ext import Application, CommandHandler, ContextTypes
-
-    TELEGRAM_AVAILABLE = True
-except ImportError:
-    TELEGRAM_AVAILABLE = False
-    print(
-        "Warning: python-telegram-bot not installed. Install with: pip install python-telegram-bot"
-    )
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 
 class StatsMonitor:
@@ -63,6 +55,8 @@ class StatsMonitor:
             "success_rate_drop": 20,  # Alert if success rate drops > 20%
             "avg_time_spike": 10,  # Alert if avg time increases > 10s            'queue_length': 10,  # Alert if queue length > 10
             'avg_total_time_spike': 15,  # Alert if total time > 15s            "alert_cooldown": 300,  # Min seconds between same alert type
+            "queue_length": 10,  # Alert if queue length > 10
+            "alert_cooldown": 300,  # Min seconds between same alert type
         }
 
     def load_stats(self) -> Optional[Dict[str, Any]]:
