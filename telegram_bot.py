@@ -61,8 +61,8 @@ class StatsMonitor:
             "requests_per_minute": 100,  # Alert if > 100 req/min
             "compilation_jump": 50,  # Alert if compilations jump by > 50
             "success_rate_drop": 20,  # Alert if success rate drops > 20%
-            "avg_time_spike": 10,  # Alert if avg time increases > 10s
-            "alert_cooldown": 300,  # Min seconds between same alert type
+            "avg_time_spike": 10,  # Alert if avg time increases > 10s            'queue_length': 10,  # Alert if queue length > 10
+            'avg_total_time_spike': 15,  # Alert if total time > 15s            "alert_cooldown": 300,  # Min seconds between same alert type
         }
 
     def load_stats(self) -> Optional[Dict[str, Any]]:
@@ -145,6 +145,35 @@ class StatsMonitor:
                         f"Increase: {time_increase:.2f}s"
                     )
                     self.last_alert_time[alert_type] = current_time
+            
+            # Check for total request time spike
+            prev_total = self.previous_stats.get("avg_total_request_seconds", 0)
+            curr_total = stats.get("avg_total_request_seconds", 0)
+            total_increase = curr_total - prev_total
+            
+            if total_increase > self.thresholds["avg_total_time_spike"]:
+                alert_type = "avg_total_time_spike"
+                if self._should_alert(alert_type, current_time):
+                    alerts.append(
+                        f"⏱️ TOTAL REQUEST TIME SPIKE!\n"
+                        f"Avg total time: {prev_total:.2f}s → {curr_total:.2f}s\n"
+                        f"Increase: {total_increase:.2f}s\n"
+                        f"(queue wait + compilation)"
+                    )
+                    self.last_alert_time[alert_type] = current_time
+        
+        # Check queue length
+        queue_length = stats.get("current_queue_length", 0)
+        if queue_length > self.thresholds["queue_length"]:
+            alert_type = "high_queue_length"
+            if self._should_alert(alert_type, current_time):
+                alerts.append(
+                    f"📊 HIGH QUEUE LENGTH!\n"
+                    f"Current queue: {queue_length} requests\n"
+                    f"Threshold: {self.thresholds['queue_length']}\n"
+                    f"System is under heavy load!"
+                )
+                self.last_alert_time[alert_type] = current_time
 
         return alerts
 
@@ -179,7 +208,20 @@ class StatsMonitor:
             f"  Min: {stats.get('min_compilation_time_seconds', 0):.2f}s",
             f"  Max: {stats.get('max_compilation_time_seconds', 0):.2f}s",
             "",
-            f"👥 *Sessions*",
+            f"� *Queue Metrics*",
+            f"  Current queue: {stats.get('current_queue_length', 0)} requests",
+            f"  Max queue seen: {stats.get('max_queue_length_seen', 0)}",
+            f"  Total queued: {stats.get('total_queued_requests', 0)}",
+            f"  Avg wait time: {stats.get('avg_queue_wait_seconds', 0):.2f}s",
+            f"  Max wait time: {stats.get('max_queue_wait_seconds', 0):.2f}s",
+            "",
+            f"🎯 *Total Request Times* (queue + compile)",
+            f"  Average: {stats.get('avg_total_request_seconds', 0):.2f}s",
+            f"  Median: {stats.get('median_total_request_seconds', 0):.2f}s",
+            f"  Min: {stats.get('min_total_request_seconds', 0):.2f}s",
+            f"  Max: {stats.get('max_total_request_seconds', 0):.2f}s",
+            "",
+            f"�👥 *Sessions*",
             f"  Unique: {stats.get('unique_sessions', 0)}",
         ]
 

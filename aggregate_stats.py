@@ -148,6 +148,7 @@ def aggregate_stats(stats_list: List[Dict[str, Any]]) -> Dict[str, Any]:
         "successful_compilations",
         "failed_compilations",
         "unique_sessions",
+        "total_queued_requests",
     ]
 
     for metric in sum_metrics:
@@ -155,7 +156,14 @@ def aggregate_stats(stats_list: List[Dict[str, Any]]) -> Dict[str, Any]:
         aggregated[metric] = sum(values)
 
     # AVERAGE metrics
-    avg_metrics = ["avg_compilation_time_seconds", "median_compilation_time_seconds"]
+    avg_metrics = [
+        "avg_compilation_time_seconds",
+        "median_compilation_time_seconds",
+        "avg_queue_wait_seconds",
+        "median_queue_wait_seconds",
+        "avg_total_request_seconds",
+        "median_total_request_seconds",
+    ]
 
     for metric in avg_metrics:
         values = [
@@ -168,26 +176,45 @@ def aggregate_stats(stats_list: List[Dict[str, Any]]) -> Dict[str, Any]:
         else:
             aggregated[metric] = 0.0
 
-    # MIN metric
-    min_values = [
-        s.get("min_compilation_time_seconds", float("inf"))
-        for s in stats_list
-        if s.get("min_compilation_time_seconds") is not None
-        and s.get("min_compilation_time_seconds") > 0
+    # MIN metrics
+    min_metrics = [
+        "min_compilation_time_seconds",
+        "min_queue_wait_seconds",
+        "min_total_request_seconds",
     ]
-    aggregated["min_compilation_time_seconds"] = (
-        round(min(min_values), 3) if min_values else 0.0
-    )
+    
+    for metric in min_metrics:
+        values = [
+            s.get(metric, float("inf"))
+            for s in stats_list
+            if s.get(metric) is not None and s.get(metric) > 0
+        ]
+        aggregated[metric] = round(min(values), 3) if values else 0.0
 
-    # MAX metric
-    max_values = [
-        s.get("max_compilation_time_seconds", 0)
-        for s in stats_list
-        if s.get("max_compilation_time_seconds") is not None
+    # MAX metrics
+    max_metrics = [
+        "max_compilation_time_seconds",
+        "max_queue_wait_seconds",
+        "max_total_request_seconds",
+        "max_queue_length_seen",
     ]
-    aggregated["max_compilation_time_seconds"] = (
-        round(max(max_values), 3) if max_values else 0.0
-    )
+    
+    for metric in max_metrics:
+        values = [
+            s.get(metric, 0)
+            for s in stats_list
+            if s.get(metric) is not None
+        ]
+        aggregated[metric] = round(max(values), 3) if values else 0.0
+    
+    # Current queue length - SUM across all servers for total system load
+    queue_lengths = [
+        s.get("current_queue_length", 0)
+        for s in stats_list
+        if s.get("current_queue_length") is not None
+    ]
+    aggregated["current_queue_length"] = sum(queue_lengths)
+    aggregated["max_queue_length_per_server"] = max(queue_lengths) if queue_lengths else 0
 
     # LATEST timestamps
     created_dates = [s.get("created_at") for s in stats_list if s.get("created_at")]
@@ -352,7 +379,13 @@ def main():
             )
             print(f"         Success rate: {aggregated.get('success_rate', 0)}%")
             print(
-                f"         Avg time: {aggregated.get('avg_compilation_time_seconds', 0)}s"
+                f"         Avg compilation time: {aggregated.get('avg_compilation_time_seconds', 0)}s"
+            )
+            print(
+                f"         Avg total time (queue+compile): {aggregated.get('avg_total_request_seconds', 0)}s"
+            )
+            print(
+                f"         Current queue length: {aggregated.get('current_queue_length', 0)}"
             )
             if nginx_metrics:
                 print(

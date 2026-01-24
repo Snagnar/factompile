@@ -62,6 +62,21 @@ class Stats:
             "median_compilation_time_seconds": 0.0,
             "min_compilation_time_seconds": 0.0,
             "max_compilation_time_seconds": 0.0,
+            # Queue metrics
+            "current_queue_length": 0,
+            "max_queue_length_seen": 0,
+            "total_queued_requests": 0,
+            "queue_wait_times": [],  # Recent wait times
+            "avg_queue_wait_seconds": 0.0,
+            "median_queue_wait_seconds": 0.0,
+            "min_queue_wait_seconds": 0.0,
+            "max_queue_wait_seconds": 0.0,
+            # Total time (queue + compilation)
+            "total_request_times": [],  # Recent total times
+            "avg_total_request_seconds": 0.0,
+            "median_total_request_seconds": 0.0,
+            "min_total_request_seconds": 0.0,
+            "max_total_request_seconds": 0.0,
         }
 
     def _ensure_fields(self, data: dict[str, Any]):
@@ -140,11 +155,74 @@ class Stats:
                 median = sorted_times[n // 2]
             self._data["median_compilation_time_seconds"] = round(median, 3)
 
+    def _compute_time_stats(self, times_list: list[float], prefix: str):
+        """Compute and update statistics for a time series."""
+        if not times_list:
+            return
+        
+        sorted_times = sorted(times_list)
+        n = len(sorted_times)
+        
+        self._data[f"avg_{prefix}_seconds"] = round(sum(sorted_times) / n, 3)
+        self._data[f"min_{prefix}_seconds"] = round(sorted_times[0], 3)
+        self._data[f"max_{prefix}_seconds"] = round(sorted_times[-1], 3)
+        
+        # Median
+        if n % 2 == 0:
+            median = (sorted_times[n // 2 - 1] + sorted_times[n // 2]) / 2
+        else:
+            median = sorted_times[n // 2]
+        self._data[f"median_{prefix}_seconds"] = round(median, 3)
+
+    async def record_queue_wait(self, wait_time: float):
+        """Record time spent waiting in queue."""
+        async with self._lock:
+            self._data["total_queued_requests"] = (
+                self._data.get("total_queued_requests", 0) + 1
+            )
+            
+            wait_times = self._data.get("queue_wait_times", [])
+            wait_times.append(round(wait_time, 3))
+            
+            if len(wait_times) > MAX_RECENT_TIMES:
+                wait_times = wait_times[-MAX_RECENT_TIMES:]
+            
+            self._data["queue_wait_times"] = wait_times
+            self._compute_time_stats(wait_times, "queue_wait")
+            await self._save()
+
+    async def record_total_request_time(self, total_time: float):
+        """Record total request time (queue wait + compilation)."""
+        async with self._lock:
+            total_times = self._data.get("total_request_times", [])
+            total_times.append(round(total_time, 3))
+            
+            if len(total_times) > MAX_RECENT_TIMES:
+                total_times = total_times[-MAX_RECENT_TIMES:]
+            
+            self._data["total_request_times"] = total_times
+            self._compute_time_stats(total_times, "total_request")
+            await self._save()
+
+    async def update_queue_length(self, queue_length: int):
+        """Update current queue length."""
+        async with self._lock:
+            self._data["current_queue_length"] = queue_length
+            
+            # Track maximum queue length seen
+            max_seen = self._data.get("max_queue_length_seen", 0)
+            if queue_length > max_seen:
+                self._data["max_queue_length_seen"] = queue_length
+            
+            await self._save()
+
     def get_stats(self) -> dict[str, Any]:
-        """Get current statistics (excluding raw times list)."""
+        """Get current statistics (excluding raw times lists)."""
         result = dict(self._data)
-        # Don't expose the raw times list
+        # Don't expose the raw times lists
         result.pop("compilation_times", None)
+        result.pop("queue_wait_times", None)
+        result.pop("total_request_times", None)
         return result
 
 

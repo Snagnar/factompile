@@ -479,12 +479,20 @@ async def compile_facto(
     # Now we have the slot, yield position 0
     logger.info(f"Request {request_id} acquired compilation slot")
     yield (OutputType.QUEUE, "0")
-
+    
+    # Record queue wait time
+    queue_wait_time = time.perf_counter() - start_wait
+    
     # Record compilation start
     stats = get_stats()
     await stats.record_compilation_start()
+    await stats.record_queue_wait(queue_wait_time)
+    
+    # Update current queue length
+    await stats.update_queue_length(queue.queue_length)
+    
     compilation_success = False
-    start_time = time.perf_counter()
+    compilation_start = time.perf_counter()
 
     try:
         # Compile directly in-process
@@ -499,13 +507,17 @@ async def compile_facto(
 
     finally:
         # Record compilation result with timing
-        duration = time.perf_counter() - start_time
+        compilation_duration = time.perf_counter() - compilation_start
+        total_duration = time.perf_counter() - start_wait
         logger.info(
-            f"Request {request_id} completed in {duration:.2f}s, success={compilation_success}"
+            f"Request {request_id} completed in {compilation_duration:.2f}s (total: {total_duration:.2f}s), success={compilation_success}"
         )
 
         if compilation_success:
-            await stats.record_compilation_success(duration)
+            await stats.record_compilation_success(compilation_duration)
         else:
-            await stats.record_compilation_failure(duration)
+            await stats.record_compilation_failure(compilation_duration)
+        
+        await stats.record_total_request_time(total_duration)
+        await stats.update_queue_length(queue.queue_length)
         await queue.release(request_id)
